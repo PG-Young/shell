@@ -1,0 +1,49 @@
+# 拼接SQL 执行
+
+# 正常标签字段
+fields=$($hive -e "USE ${dname}; DESC ${tname};" 2>/dev/null | egrep -v "^#|^uid |^ds |^\s+$" | awk '{print $1}')
+
+ret=$?
+if [ ! $ret = 0 ]; then
+    echo "fail to find available tag meta"
+    exit $ret
+fi
+
+# 拼成to_json udf所需参数
+json_udf_params=""
+for f in $fields; do
+    if [ ! $json_udf_params = "" ]; then
+        json_udf_params="${json_udf_params},"
+    fi
+    json_udf_params="${json_udf_params}\"${f}\",$f"
+done
+
+# 创建udf -> 创建中间表 -> 查询数据
+export_sql="
+add jar ${base_path}/bin/lib/brickhouse-0.6.0.jar;
+CREATE TEMPORARY FUNCTION to_json AS 'brickhouse.udf.json.ToJsonUDF';
+
+USE ${dname};
+
+CREATE TABLE IF NOT EXISTS ${mid_tname} (
+uid STRING,
+value STRING
+)
+COMMENT '以JSON格式导scylladb的中间表'
+PARTITIONED BY (tb string, ds string)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\001';
+
+INSERT OVERWRITE TABLE ${mid_tname} partition(tb='${tname}', ds='${ds}')
+SELECT uid, to_json(named_struct($json_udf_params))
+FROM $tname
+WHERE ds='$ds' and ${utime_col}>=$utime;
+"
+
+echo "export SQL: $export_sql"
+$hive -e "${export_sql}"
+
+ret=$?
+if [ ! $ret = 0 ]; then
+    echo "fail to select tag data"
+    exit $ret
+fi
